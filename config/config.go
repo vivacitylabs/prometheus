@@ -29,13 +29,11 @@ import (
 	"github.com/grafana/regexp"
 	"github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/common/sigv4"
 	"gopkg.in/yaml.v2"
 
 	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/relabel"
-	"github.com/prometheus/prometheus/storage/remote/azuread"
 )
 
 var (
@@ -927,7 +925,7 @@ type AlertmanagerConfig struct {
 
 	ServiceDiscoveryConfigs discovery.Configs       `yaml:"-"`
 	HTTPClientConfig        config.HTTPClientConfig `yaml:",inline"`
-	SigV4Config             *sigv4.SigV4Config      `yaml:"sigv4,omitempty"`
+	//SigV4Config             *sigv4.SigV4Config      `yaml:"sigv4,omitempty"`
 
 	// The URL scheme to use when talking to Alertmanagers.
 	Scheme string `yaml:"scheme,omitempty"`
@@ -968,7 +966,7 @@ func (c *AlertmanagerConfig) UnmarshalYAML(unmarshal func(interface{}) error) er
 	httpClientConfigAuthEnabled := c.HTTPClientConfig.BasicAuth != nil ||
 		c.HTTPClientConfig.Authorization != nil || c.HTTPClientConfig.OAuth2 != nil
 
-	if httpClientConfigAuthEnabled && c.SigV4Config != nil {
+	if httpClientConfigAuthEnabled {
 		return fmt.Errorf("at most one of basic_auth, authorization, oauth2, & sigv4 must be configured")
 	}
 
@@ -1040,8 +1038,8 @@ type RemoteWriteConfig struct {
 	HTTPClientConfig config.HTTPClientConfig `yaml:",inline"`
 	QueueConfig      QueueConfig             `yaml:"queue_config,omitempty"`
 	MetadataConfig   MetadataConfig          `yaml:"metadata_config,omitempty"`
-	SigV4Config      *sigv4.SigV4Config      `yaml:"sigv4,omitempty"`
-	AzureADConfig    *azuread.AzureADConfig  `yaml:"azuread,omitempty"`
+	//SigV4Config      *sigv4.SigV4Config      `yaml:"sigv4,omitempty"`
+	//AzureADConfig    *azuread.AzureADConfig  `yaml:"azuread,omitempty"`
 }
 
 // SetDirectory joins any relative file paths with dir.
@@ -1078,12 +1076,8 @@ func (c *RemoteWriteConfig) UnmarshalYAML(unmarshal func(interface{}) error) err
 	httpClientConfigAuthEnabled := c.HTTPClientConfig.BasicAuth != nil ||
 		c.HTTPClientConfig.Authorization != nil || c.HTTPClientConfig.OAuth2 != nil
 
-	if httpClientConfigAuthEnabled && (c.SigV4Config != nil || c.AzureADConfig != nil) {
-		return fmt.Errorf("at most one of basic_auth, authorization, oauth2, sigv4, & azuread must be configured")
-	}
-
-	if c.SigV4Config != nil && c.AzureADConfig != nil {
-		return fmt.Errorf("at most one of basic_auth, authorization, oauth2, sigv4, & azuread must be configured")
+	if httpClientConfigAuthEnabled {
+		return fmt.Errorf("at most one of basic_auth, authorization, oauth2, & sigv4 must be configured")
 	}
 
 	return nil

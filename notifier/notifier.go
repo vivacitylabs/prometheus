@@ -32,7 +32,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/common/sigv4"
 	"github.com/prometheus/common/version"
 	"go.uber.org/atomic"
 
@@ -662,12 +661,12 @@ func newAlertmanagerSet(cfg *config.AlertmanagerConfig, logger log.Logger, metri
 	}
 	t := client.Transport
 
-	if cfg.SigV4Config != nil {
-		t, err = sigv4.NewSigV4RoundTripper(cfg.SigV4Config, client.Transport)
-		if err != nil {
-			return nil, err
-		}
-	}
+	//if cfg.SigV4Config != nil {
+	//	t, err = sigv4.NewSigV4RoundTripper(cfg.SigV4Config, client.Transport)
+	//	if err != nil {
+	//		return nil, err
+	//	}
+	//}
 
 	client.Transport = t
 
