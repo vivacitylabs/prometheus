@@ -79,7 +79,7 @@ func init() {
 // Client allows reading and writing from/to a remote HTTP endpoint.
 type Client struct {
 	remoteName string // Used to differentiate clients in metrics.
-	url        *config_util.URL
+	urlString  string // url.String()
 	Client     *http.Client
 	timeout    time.Duration
 
@@ -121,7 +121,7 @@ func NewReadClient(name string, conf *ClientConfig) (ReadClient, error) {
 
 	return &Client{
 		remoteName:          name,
-		url:                 conf.URL,
+		urlString:           conf.URL.String(),
 		Client:              httpClient,
 		timeout:             time.Duration(conf.Timeout),
 		readQueries:         remoteReadQueries.WithLabelValues(name, conf.URL.String()),
@@ -153,7 +153,7 @@ func NewWriteClient(name string, conf *ClientConfig) (WriteClient, error) {
 
 	return &Client{
 		remoteName:       name,
-		url:              conf.URL,
+		urlString:        conf.URL.String(),
 		Client:           httpClient,
 		retryOnRateLimit: conf.RetryOnRateLimit,
 		timeout:          time.Duration(conf.Timeout),
@@ -186,7 +186,7 @@ type RecoverableError struct {
 // Store sends a batch of samples to the HTTP endpoint, the request is the proto marshalled
 // and encoded bytes from codec.go.
 func (c *Client) Store(ctx context.Context, req []byte) error {
-	httpReq, err := http.NewRequest("POST", c.url.String(), bytes.NewReader(req))
+	httpReq, err := http.NewRequest("POST", c.urlString, bytes.NewReader(req))
 	if err != nil {
 		// Errors from NewRequest are from unparsable URLs, so are not
 		// recoverable.
@@ -254,7 +254,7 @@ func (c Client) Name() string {
 
 // Endpoint is the remote read or write endpoint.
 func (c Client) Endpoint() string {
-	return c.url.String()
+	return c.urlString
 }
 
 // Read reads from a remote endpoint.
@@ -275,7 +275,7 @@ func (c *Client) Read(ctx context.Context, query *prompb.Query) (*prompb.QueryRe
 	}
 
 	compressed := snappy.Encode(nil, data)
-	httpReq, err := http.NewRequest("POST", c.url.String(), bytes.NewReader(compressed))
+	httpReq, err := http.NewRequest("POST", c.urlString, bytes.NewReader(compressed))
 	if err != nil {
 		return nil, fmt.Errorf("unable to create request: %w", err)
 	}
@@ -309,7 +309,7 @@ func (c *Client) Read(ctx context.Context, query *prompb.Query) (*prompb.QueryRe
 	}
 
 	if httpResp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("remote server %s returned HTTP status %s: %s", c.url.String(), httpResp.Status, strings.TrimSpace(string(compressed)))
+		return nil, fmt.Errorf("remote server %s returned HTTP status %s: %s", c.urlString, httpResp.Status, strings.TrimSpace(string(compressed)))
 	}
 
 	uncompressed, err := snappy.Decode(nil, compressed)

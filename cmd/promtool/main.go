@@ -31,6 +31,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/google/pprof/profile"
 	"github.com/prometheus/client_golang/api"
@@ -41,7 +42,6 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/exporter-toolkit/web"
-	"gopkg.in/alecthomas/kingpin.v2"
 	"gopkg.in/yaml.v2"
 
 	dto "github.com/prometheus/client_model/go"
@@ -59,6 +59,7 @@ import (
 	_ "github.com/prometheus/prometheus/plugins" // Register plugins.
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/scrape"
+	"github.com/prometheus/prometheus/util/documentcli"
 )
 
 const (
@@ -70,6 +71,8 @@ const (
 	lintOptionAll            = "all"
 	lintOptionDuplicateRules = "duplicate-rules"
 	lintOptionNone           = "none"
+	checkHealth              = "/-/healthy"
+	checkReadiness           = "/-/ready"
 )
 
 var lintOptions = []string{lintOptionAll, lintOptionDuplicateRules, lintOptionNone}
@@ -111,6 +114,14 @@ func main() {
 		"web-config-files",
 		"The config files to check.",
 	).Required().ExistingFiles()
+
+	checkServerHealthCmd := checkCmd.Command("healthy", "Check if the Prometheus server is healthy.")
+	checkServerHealthCmd.Flag("http.config.file", "HTTP client configuration file for promtool to connect to Prometheus.").PlaceHolder("<filename>").ExistingFileVar(&httpConfigFilePath)
+	checkServerHealthCmd.Flag("url", "The URL for the Prometheus server.").Default("http://localhost:9090").URLVar(&serverURL)
+
+	checkServerReadyCmd := checkCmd.Command("ready", "Check if the Prometheus server is ready.")
+	checkServerReadyCmd.Flag("http.config.file", "HTTP client configuration file for promtool to connect to Prometheus.").PlaceHolder("<filename>").ExistingFileVar(&httpConfigFilePath)
+	checkServerReadyCmd.Flag("url", "The URL for the Prometheus server.").Default("http://localhost:9090").URLVar(&serverURL)
 
 	checkRulesCmd := checkCmd.Command("rules", "Check if the rule files are valid or not.")
 	ruleFiles := checkRulesCmd.Arg(
@@ -223,6 +234,8 @@ func main() {
 
 	featureList := app.Flag("enable-feature", "Comma separated feature names to enable (only PromQL related and no-default-scrape-port). See https://prometheus.io/docs/prometheus/latest/feature_flags/ for the options and more details.").Default("").Strings()
 
+	documentationCmd := app.Command("write-documentation", "Generate command line documentation. Internal use.").Hidden()
+
 	parsedCmd := kingpin.MustParse(app.Parse(os.Args[1:]))
 
 	var p printer
@@ -272,6 +285,12 @@ func main() {
 
 	case checkConfigCmd.FullCommand():
 		os.Exit(CheckConfig(*agentMode, *checkConfigSyntaxOnly, newLintConfig(*checkConfigLint, *checkConfigLintFatal), *configFiles...))
+
+	case checkServerHealthCmd.FullCommand():
+		os.Exit(checkErr(CheckServerStatus(serverURL, checkHealth, httpRoundTripper)))
+
+	case checkServerReadyCmd.FullCommand():
+		os.Exit(checkErr(CheckServerStatus(serverURL, checkReadiness, httpRoundTripper)))
 
 	case checkWebConfigCmd.FullCommand():
 		os.Exit(CheckWebConfig(*webConfigFiles...))
@@ -329,6 +348,8 @@ func main() {
 
 	case importRulesCmd.FullCommand():
 		os.Exit(checkErr(importRules(serverURL, httpRoundTripper, *importRulesStart, *importRulesEnd, *importRulesOutputDir, *importRulesEvalInterval, *maxBlockDuration, *importRulesFiles...)))
+	case documentationCmd.FullCommand():
+		os.Exit(checkErr(documentcli.GenerateMarkdown(app.Model(), os.Stdout)))
 	}
 }
 
@@ -362,6 +383,43 @@ func newLintConfig(stringVal string, fatal bool) lintConfig {
 
 func (ls lintConfig) lintDuplicateRules() bool {
 	return ls.all || ls.duplicateRules
+}
+
+// Check server status - healthy & ready.
+func CheckServerStatus(serverURL *url.URL, checkEndpoint string, roundTripper http.RoundTripper) error {
+	if serverURL.Scheme == "" {
+		serverURL.Scheme = "http"
+	}
+
+	config := api.Config{
+		Address:      serverURL.String() + checkEndpoint,
+		RoundTripper: roundTripper,
+	}
+
+	// Create new client.
+	c, err := api.NewClient(config)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error creating API client:", err)
+		return err
+	}
+
+	request, err := http.NewRequest("GET", config.Address, nil)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	response, dataBytes, err := c.Do(ctx, request)
+	if err != nil {
+		return err
+	}
+
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("check failed: URL=%s, status=%d", serverURL, response.StatusCode)
+	}
+
+	fmt.Fprintln(os.Stderr, "  SUCCESS: ", string(dataBytes))
+	return nil
 }
 
 // CheckConfig validates configuration files.
@@ -463,7 +521,18 @@ func checkConfig(agentMode bool, filename string, checkSyntaxOnly bool) ([]strin
 		}
 	}
 
-	for _, scfg := range cfg.ScrapeConfigs {
+	var scfgs []*config.ScrapeConfig
+	if checkSyntaxOnly {
+		scfgs = cfg.ScrapeConfigs
+	} else {
+		var err error
+		scfgs, err = cfg.GetScrapeConfigs()
+		if err != nil {
+			return nil, fmt.Errorf("error loading scrape configs: %w", err)
+		}
+	}
+
+	for _, scfg := range scfgs {
 		if !checkSyntaxOnly && scfg.HTTPClientConfig.Authorization != nil {
 			if err := checkFileExists(scfg.HTTPClientConfig.Authorization.CredentialsFile); err != nil {
 				return nil, fmt.Errorf("error checking authorization credentials or bearer token file %q: %w", scfg.HTTPClientConfig.Authorization.CredentialsFile, err)
@@ -1250,8 +1319,11 @@ func checkTargetGroupsForAlertmanager(targetGroups []*targetgroup.Group, amcfg *
 }
 
 func checkTargetGroupsForScrapeConfig(targetGroups []*targetgroup.Group, scfg *config.ScrapeConfig) error {
+	var targets []*scrape.Target
+	lb := labels.NewBuilder(labels.EmptyLabels())
 	for _, tg := range targetGroups {
-		_, failures := scrape.TargetsFromGroup(tg, scfg, false)
+		var failures []error
+		targets, failures = scrape.TargetsFromGroup(tg, scfg, false, targets, lb)
 		if len(failures) > 0 {
 			first := failures[0]
 			return first

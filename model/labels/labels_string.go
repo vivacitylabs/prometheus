@@ -19,12 +19,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
-	"sort"
 	"strconv"
 	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/prometheus/common/model"
+	"golang.org/x/exp/slices"
 )
 
 // Well-known label names used by Prometheus components.
@@ -56,8 +56,14 @@ func (ls labelSlice) Swap(i, j int)      { ls[i], ls[j] = ls[j], ls[i] }
 func (ls labelSlice) Less(i, j int) bool { return ls[i].Name < ls[j].Name }
 
 func decodeSize(data string, index int) (int, int) {
-	var size int
-	for shift := uint(0); ; shift += 7 {
+	// Fast-path for common case of a single byte, value 0..127.
+	b := data[index]
+	index++
+	if b < 0x80 {
+		return int(b), index
+	}
+	size := int(b & 0x7F)
+	for shift := uint(7); ; shift += 7 {
 		// Just panic if we go of the end of data, since all Labels strings are constructed internally and
 		// malformed data indicates a bug, or memory corruption.
 		b := data[index]
@@ -158,7 +164,7 @@ func (ls Labels) MatchLabels(on bool, names ...string) Labels {
 		b.Del(MetricName)
 		b.Del(names...)
 	}
-	return b.Labels(EmptyLabels())
+	return b.Labels()
 }
 
 // Hash returns a hash value for the label set.
@@ -385,7 +391,7 @@ func yoloBytes(s string) (b []byte) {
 // New returns a sorted Labels from the given labels.
 // The caller has to guarantee that all label names are unique.
 func New(ls ...Label) Labels {
-	sort.Sort(labelSlice(ls))
+	slices.SortFunc(ls, func(a, b Label) bool { return a.Name < b.Name })
 	size := labelsSize(ls)
 	buf := make([]byte, size)
 	marshalLabelsToSizedBuffer(ls, buf)
@@ -411,7 +417,6 @@ func FromStrings(ss ...string) Labels {
 		ls = append(ls, Label{Name: ss[i], Value: ss[i+1]})
 	}
 
-	sort.Sort(labelSlice(ls))
 	return New(ls...)
 }
 
@@ -587,19 +592,57 @@ func (b *Builder) Set(n, v string) *Builder {
 	return b
 }
 
-// Labels returns the labels from the builder, adding them to res if non-nil.
-// Argument res can be the same as b.base, if caller wants to overwrite that slice.
+func (b *Builder) Get(n string) string {
+	if slices.Contains(b.del, n) {
+		return ""
+	}
+	for _, a := range b.add {
+		if a.Name == n {
+			return a.Value
+		}
+	}
+	return b.base.Get(n)
+}
+
+// Range calls f on each label in the Builder.
+func (b *Builder) Range(f func(l Label)) {
+	// Stack-based arrays to avoid heap allocation in most cases.
+	var addStack [128]Label
+	var delStack [128]string
+	// Take a copy of add and del, so they are unaffected by calls to Set() or Del().
+	origAdd, origDel := append(addStack[:0], b.add...), append(delStack[:0], b.del...)
+	b.base.Range(func(l Label) {
+		if !slices.Contains(origDel, l.Name) && !contains(origAdd, l.Name) {
+			f(l)
+		}
+	})
+	for _, a := range origAdd {
+		f(a)
+	}
+}
+
+func contains(s []Label, n string) bool {
+	for _, a := range s {
+		if a.Name == n {
+			return true
+		}
+	}
+	return false
+}
+
+// Labels returns the labels from the builder.
 // If no modifications were made, the original labels are returned.
-func (b *Builder) Labels(res Labels) Labels {
+func (b *Builder) Labels() Labels {
 	if len(b.del) == 0 && len(b.add) == 0 {
 		return b.base
 	}
 
-	sort.Sort(labelSlice(b.add))
-	sort.Strings(b.del)
+	slices.SortFunc(b.add, func(a, b Label) bool { return a.Name < b.Name })
+	slices.Sort(b.del)
 	a, d := 0, 0
 
-	buf := make([]byte, 0, len(b.base.data)) // TODO: see if we can re-use the buffer from res.
+	bufSize := len(b.base.data) + labelsSize(b.add)
+	buf := make([]byte, 0, bufSize)
 	for pos := 0; pos < len(b.base.data); {
 		oldPos := pos
 		var lName string
@@ -753,10 +796,10 @@ func (b *ScratchBuilder) Add(name, value string) {
 
 // Sort the labels added so far by name.
 func (b *ScratchBuilder) Sort() {
-	sort.Sort(labelSlice(b.add))
+	slices.SortFunc(b.add, func(a, b Label) bool { return a.Name < b.Name })
 }
 
-// Asssign is for when you already have a Labels which you want this ScratchBuilder to return.
+// Assign is for when you already have a Labels which you want this ScratchBuilder to return.
 func (b *ScratchBuilder) Assign(l Labels) {
 	b.output = l
 }
@@ -774,7 +817,7 @@ func (b *ScratchBuilder) Labels() Labels {
 }
 
 // Write the newly-built Labels out to ls, reusing an internal buffer.
-// Callers must ensure that there are no other references to ls.
+// Callers must ensure that there are no other references to ls, or any strings fetched from it.
 func (b *ScratchBuilder) Overwrite(ls *Labels) {
 	size := labelsSize(b.add)
 	if size <= cap(b.overwriteBuffer) {
